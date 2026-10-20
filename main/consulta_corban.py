@@ -30,7 +30,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout, sync_playwrig
 # ✏️  CONFIGURAÇÕES — Edite estas variáveis se necessário
 # ============================================================
 
-USUARIO = "Supervisao@37277"  # ← seu usuário de login
+USUARIO = "ti@37277"  # ← seu usuário de login
 SENHA = "Safira@26"  # ← sua senha de login
 ARQUIVO_ENTRADA = "cpfs.csv"  # ← arquivo com CPFs na 1ª coluna
 ARQUIVO_SAIDA = "resultados.csv"  # ← arquivo de saída (gerado)
@@ -43,11 +43,16 @@ LIMITE_CPFS = 500  # Máximo de CPFs pendentes a processar por execução
 IDADE_LIMITE = 81  # Apenas pessoas com menos de 81 anos (< 81)
 PARCELAS_PAGAS_LIMITE = 10  # Apenas até 10 parcelas pagas (<= 10)
 PULAR_SE_SEM_EMPRESTIMO = True  # Pular se não houver empréstimo averbado
-TIMEOUT_BUSCA = 25  # Segundos limite esperando a resposta antes de encerrar por limite diário
+TIMEOUT_BUSCA = 45   # Segundos limite esperando a resposta antes de encerrar por limite diário
 
 
 class LimiteConsultasExcedido(Exception):
     """Lançada quando a busca excede 25s, indicando limite diário de consultas atingido."""
+    pass
+
+
+class ErroParadaImediata(Exception):
+    """Lançada quando ocorre erro de Locator (ex: Locator.click, Timeout) exigindo parada imediata sem registrar o CPF."""
     pass
 
 
@@ -566,22 +571,25 @@ def processar_cpf(page, cpf_raw: str, resultados: list[dict]) -> None:
                 if i < qtd - 1:
                     buscar_cpf(page, cpf_limpo)
 
-            except PlaywrightTimeout:
-                log.error(f"  Timeout no benefício {i+1} do CPF {cpf_fmt}")
             except Exception as e:
+                msg_e = str(e)
+                if "locator.click" in msg_e.lower() or isinstance(e, PlaywrightTimeout):
+                    raise ErroParadaImediata(
+                        f"Erro de Locator/Timeout no benefício {i+1} do CPF {cpf_fmt}: {e}"
+                    )
                 log.error(f"  Erro no benefício {i+1} do CPF {cpf_fmt}: {e}")
-                try:
-                    page.go_back()
-                    page.wait_for_timeout(2_000)
-                    if i < qtd - 1:
-                        buscar_cpf(page, cpf_limpo)
-                except Exception:
-                    pass
+                raise ErroParadaImediata(
+                    f"Erro durante a leitura do benefício {i+1} do CPF {cpf_fmt}: {e}"
+                )
 
-    except LimiteConsultasExcedido:
+    except (LimiteConsultasExcedido, ErroParadaImediata):
         raise
     except Exception as e:
+        msg_e = str(e)
+        if "locator.click" in msg_e.lower() or isinstance(e, PlaywrightTimeout):
+            raise ErroParadaImediata(f"Erro de Locator/Timeout ao processar CPF {cpf_fmt}: {e}")
         log.error(f"  Erro ao processar CPF {cpf_fmt}: {e}")
+        raise ErroParadaImediata(f"Erro inesperado ao processar CPF {cpf_fmt}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -642,15 +650,32 @@ def main() -> None:
             fazer_login(pagina)
 
             for idx, cpf in enumerate(cpfs_pendentes, start=1):
-                log.info(f"\n[{idx}/{total}] CPF: {formatar_cpf(limpar_cpf(cpf))}")
+                cpf_limpo_atual = limpar_cpf(cpf)
+                cpf_fmt_atual = formatar_cpf(cpf_limpo_atual)
+                log.info(f"\n[{idx}/{total}] CPF: {cpf_fmt_atual}")
                 try:
                     processar_cpf(pagina, cpf, novos_resultados)
+                    # Só registra o CPF como consultado se a função acima concluiu SEM erro
                     registrar_cpf_consultado(cpf)
                 except LimiteConsultasExcedido as e:
                     log.error(f"\n[LIMITE DIÁRIO ATINGIDO] {e}")
                     log.warning(
                         "Encerrando o script imediatamente para preservar os CPFs pendentes para o próximo dia."
                     )
+                    break
+                except ErroParadaImediata as e:
+                    log.error(f"\n[ERRO DE EXECUÇÃO DETECTADO] {e}")
+                    log.warning(
+                        f"O CPF {cpf_fmt_atual} NÃO foi marcado como consultado e permanecerá na lista de pendentes."
+                    )
+                    log.warning("Encerrando o programa imediatamente conforme configurado.")
+                    break
+                except Exception as e:
+                    log.error(f"\n[ERRO CRÍTICO NO CPF {cpf_fmt_atual}] {e}")
+                    log.warning(
+                        f"O CPF {cpf_fmt_atual} NÃO foi marcado como consultado e permanecerá na lista de pendentes."
+                    )
+                    log.warning("Encerrando o programa imediatamente.")
                     break
 
                 if idx % 10 == 0:
