@@ -6,6 +6,7 @@ from core.config import AppConfig
 from core.corban_client import CorbanClient
 from core.domain import (
     ErroParadaImediata,
+    LimiteConsultasExcedido,
     ResultadoConsulta,
     formatar_telefone,
     limpar_telefone,
@@ -17,20 +18,23 @@ log = logging.getLogger(__name__)
 
 class ConsultaEngine:
     """
-    Orquestrador do fluxo de consultas.
-    Coordena a leitura de pendentes, chamadas ao cliente Corban, salvamento de checkpoints e pausas de 10s.
+    Orquestrador do fluxo de consultas com suporte a rotação automática de contas
+    quando o limite diário de consultas for atingido.
     """
 
     def __init__(self, config: AppConfig, repository: PhoneRepository, client: CorbanClient):
         self.config = config
         self.repository = repository
         self.client = client
+        self.indice_conta_atual = 0
 
     def executar(self) -> None:
         """Executa o ciclo completo de consultas para a fila de telefones pendentes."""
         log.info("=" * 60)
         log.info("  INICIANDO CONSULTA CORBAN (TELEFONE -> CPF)")
         log.info(f"  Início: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        log.info(f"  Contas disponíveis: {len(self.config.contas)}")
+        log.info(f"  Conta inicial ativa: '{self.client.credencial_ativa.usuario}'")
         log.info("=" * 60)
 
         pendentes = self.repository.obter_pendentes()
@@ -44,17 +48,21 @@ class ConsultaEngine:
 
         novos_resultados: list[ResultadoConsulta] = []
         ultimo_salvo = 0
+        idx_tel = 0
 
         try:
-            for idx, tel_raw in enumerate(pendentes, start=1):
+            while idx_tel < total:
+                tel_raw = pendentes[idx_tel]
                 tel_fmt = formatar_telefone(tel_raw)
                 tel_limpo = limpar_telefone(tel_raw)
 
                 if len(tel_limpo) not in (10, 11):
-                    log.warning(f"[{idx}/{total}] Telefone ignorado (formato inválido): {tel_raw!r}")
+                    log.warning(f"[{idx_tel + 1}/{total}] Telefone ignorado (formato inválido): {tel_raw!r}")
+                    idx_tel += 1
                     continue
 
-                log.info(f"\n[{idx}/{total}] Pesquisando: {tel_fmt}")
+                conta_atual = self.client.credencial_ativa.usuario
+                log.info(f"\n[{idx_tel + 1}/{total}] Pesquisando: {tel_fmt} (Conta: {conta_atual})")
 
                 try:
                     cpfs = self.client.buscar_cpfs_por_telefone(tel_raw)
@@ -67,22 +75,54 @@ class ConsultaEngine:
                             novos_resultados.append(item)
                             log.info(f"  [★ ENCONTRADO] Telefone: {tel_fmt} | CPF: {cpf}")
 
-                    # Só marca como consultado se a busca rodou sem erros críticos
+                    # Só marca como consultado se a busca rodou com sucesso
                     self.repository.marcar_como_consultado(tel_raw)
+                    idx_tel += 1
+
+                except LimiteConsultasExcedido as e:
+                    log.warning(f"\n[LIMITE DIÁRIO ATINGIDO] {e}")
+                    self.indice_conta_atual += 1
+
+                    if self.indice_conta_atual < len(self.config.contas):
+                        proxima_conta = self.config.contas[self.indice_conta_atual]
+                        log.info(
+                            f"🔄 Alternando para próxima conta "
+                            f"[{self.indice_conta_atual + 1}/{len(self.config.contas)}]: '{proxima_conta.usuario}'..."
+                        )
+                        try:
+                            self.client.alternar_conta(proxima_conta)
+                            log.info(f"✔ Nova conta pronta! Retestando o telefone {tel_fmt}...")
+                            time.sleep(2)
+                            # Não incrementa idx_tel: repete a busca do mesmo telefone com a nova conta
+                            continue
+                        except Exception as err_troca:
+                            log.error(f"Erro ao alternar para conta '{proxima_conta.usuario}': {err_troca}")
+                            log.warning("Tentando avançar para a próxima conta disponível...")
+                            continue
+                    else:
+                        log.error(
+                            "\n[LIMITE TOTAL ATINGIDO] Todas as contas disponíveis atingiram o limite diário de consultas!"
+                        )
+                        log.warning(
+                            f"O telefone {tel_fmt} e os seguintes permanecerão na lista de pendentes para o próximo dia."
+                        )
+                        log.warning("Encerrando a execução para preservar os dados pendentes.")
+                        break
 
                 except ErroParadaImediata as e:
                     log.error(f"\n[ERRO DE EXECUÇÃO DETECTADO] {e}")
                     log.warning(f"O telefone {tel_fmt} NÃO foi marcado como consultado para nova tentativa futura.")
                     log.warning("Encerrando o processo com segurança.")
                     break
+
                 except Exception as e:
                     log.error(f"\n[ERRO INESPERADO NO TELEFONE {tel_fmt}] {e}")
                     log.warning(f"O telefone {tel_fmt} NÃO foi marcado como consultado.")
                     log.warning("Encerrando o processo imediatamente.")
                     break
 
-                # Checkpoint periódico a cada N registros
-                if idx % self.config.intervalo_checkpoint == 0:
+                # Checkpoint periódico a cada N registros salvos
+                if idx_tel > 0 and idx_tel % self.config.intervalo_checkpoint == 0:
                     trecho = novos_resultados[ultimo_salvo:]
                     if trecho:
                         self.repository.salvar_resultados(trecho)
@@ -90,7 +130,7 @@ class ConsultaEngine:
                         log.info(f"  ✔ Checkpoint: {ultimo_salvo} registro(s) salvos no CSV.")
 
                 # Intervalo obrigatório de 10 segundos entre consultas no Corban
-                if idx < total:
+                if idx_tel < total:
                     log.info(f"  ⏳ Aguardando {self.config.tempo_entre_buscas}s para próxima consulta...")
                     time.sleep(self.config.tempo_entre_buscas)
 

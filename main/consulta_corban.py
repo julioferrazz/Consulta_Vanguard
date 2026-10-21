@@ -4,7 +4,8 @@
   CONSULTA CORBAN - Busca por TELEFONE e Extração de CPF
 ============================================================
   Ponto de entrada (CLI) da aplicação.
-  Orquestra o repositório de dados e o cliente de automação web.
+  Orquestra o repositório de dados, o cliente de automação web
+  e o motor de rotação de credenciais.
 
   Requisitos: playwright, openpyxl
   Uso: python consulta_corban.py
@@ -38,10 +39,11 @@ log = logging.getLogger(__name__)
 
 
 def main() -> None:
-    config = AppConfig()
+    # Carrega configurações a partir do arquivo .env e variáveis de ambiente
+    config = AppConfig.carregar()
 
-    if config.usuario in ("SEU_USUARIO", "") or config.senha in ("SUA_SENHA", ""):
-        log.error("Configure USUARIO e SENHA em 'core/config.py' antes de executar!")
+    if not config.contas:
+        log.error("Nenhuma conta configurada! Defina CORBAN_CONTAS no arquivo '.env'.")
         sys.exit(1)
 
     repository = PhoneRepository(config)

@@ -13,8 +13,19 @@ class ErroParadaImediata(ErroConsulta):
 
 
 class LimiteConsultasExcedido(ErroConsulta):
-    """Lançada quando a busca atinge o limite do portal Corban."""
+    """Lançada quando a busca atinge o limite diário de consultas do portal Corban."""
     pass
+
+
+@dataclass(frozen=True)
+class Credencial:
+    """Representa uma conta de acesso ao portal Corban."""
+    usuario: str
+    senha: str
+
+    def __repr__(self) -> str:
+        # Mascara a senha para segurança nos logs
+        return f"Credencial(usuario='{self.usuario}', senha='***')"
 
 
 @dataclass(frozen=True)

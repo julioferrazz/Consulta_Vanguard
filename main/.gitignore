@@ -178,3 +178,8 @@ pyrightconfig.json
 
 # log files
 *.log
+
+# environment variables
+.env
+.env.*
+!.env.example
