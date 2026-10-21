@@ -87,8 +87,9 @@ Consulta_Vanguard/
 
 2. Instale as dependências necessárias:
    ```powershell
-   pip install playwright openpyxl
+   pip install -r requirements.txt
    ```
+   *(ou `pip install playwright openpyxl python-dotenv`)*
 
 3. Instale os navegadores do Playwright (se for a primeira vez):
    ```powershell

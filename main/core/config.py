@@ -7,46 +7,21 @@ from typing import List
 from core.domain import Credencial
 
 
+from dotenv import find_dotenv, load_dotenv
+
+
 def carregar_env() -> None:
-    """
-    Carregador embutido de arquivo .env (sem dependências externas).
-    Procura por .env no diretório atual ou no diretório pai/main.
-    """
-    locais = [
-        Path(".env"),
-        Path("main/.env"),
-        Path(__file__).resolve().parent.parent / ".env",
-        Path(__file__).resolve().parent.parent.parent / ".env",
-    ]
-
-    env_path = None
-    for loc in locais:
-        if loc.exists() and loc.is_file():
-            env_path = loc
-            break
-
-    if not env_path:
-        return
-
-    try:
-        with open(env_path, "r", encoding="utf-8-sig", errors="replace") as f:
-            for linha in f:
-                linha = linha.strip()
-                if not linha or linha.startswith("#"):
-                    continue
-                if "=" in linha:
-                    chave, valor = linha.split("=", 1)
-                    chave = chave.strip()
-                    valor = valor.strip()
-                    # Remove aspas se houver
-                    if (valor.startswith('"') and valor.endswith('"')) or (
-                        valor.startswith("'") and valor.endswith("'")
-                    ):
-                        valor = valor[1:-1]
-                    if chave and chave not in os.environ:
-                        os.environ[chave] = valor
-    except Exception:
-        pass
+    """Carrega as variáveis do arquivo .env usando a biblioteca python-dotenv."""
+    env_file = find_dotenv(usecwd=True)
+    if env_file:
+        load_dotenv(env_file)
+    else:
+        # Fallback local direto
+        locais = [Path(".env"), Path("main/.env"), Path(__file__).resolve().parent.parent / ".env"]
+        for p in locais:
+            if p.exists():
+                load_dotenv(p)
+                break
 
 
 @dataclass

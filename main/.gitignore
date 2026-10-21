@@ -175,6 +175,7 @@ pyrightconfig.json
 
 # txt files
 *.txt
+!requirements.txt
 
 # log files
 *.log
