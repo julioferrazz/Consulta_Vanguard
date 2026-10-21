@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 class ConsultaEngine:
     """
     Orquestrador do fluxo de consultas com suporte a rotação automática de contas
-    quando o limite diário de consultas for atingido.
+    quando o limite diário de consultas for atingido e verificação estrita de duplicatas.
     """
 
     def __init__(self, config: AppConfig, repository: PhoneRepository, client: CorbanClient):
@@ -37,11 +37,15 @@ class ConsultaEngine:
         log.info(f"  Conta inicial ativa: '{self.client.credencial_ativa.usuario}'")
         log.info("=" * 60)
 
+        # Carrega histórico global de números já processados (CSV de saída + TXT de histórico)
+        ja_processados = self.repository.carregar_telefones_processados()
+        consultados_na_sessao: set[str] = set()
+
         pendentes = self.repository.obter_pendentes()
         total = len(pendentes)
 
         if total == 0:
-            log.info("Nenhum telefone pendente para consulta. Tudo concluído!")
+            log.info("Nenhum telefone pendente para consulta. Todos já foram verificados!")
             return
 
         log.info(f"{total} telefone(s) pendente(s) para processar nesta sessão.")
@@ -56,8 +60,15 @@ class ConsultaEngine:
                 tel_fmt = formatar_telefone(tel_raw)
                 tel_limpo = limpar_telefone(tel_raw)
 
+                # 1. Validação de formato
                 if len(tel_limpo) not in (10, 11):
                     log.warning(f"[{idx_tel + 1}/{total}] Telefone ignorado (formato inválido): {tel_raw!r}")
+                    idx_tel += 1
+                    continue
+
+                # 2. Verificação se o número já foi verificado anteriormente ou nesta sessão
+                if tel_limpo in ja_processados or tel_limpo in consultados_na_sessao:
+                    log.info(f"[{idx_tel + 1}/{total}] Telefone {tel_fmt} já foi verificado anteriormente. Pulando.")
                     idx_tel += 1
                     continue
 
@@ -75,8 +86,10 @@ class ConsultaEngine:
                             novos_resultados.append(item)
                             log.info(f"  [★ ENCONTRADO] Telefone: {tel_fmt} | CPF: {cpf}")
 
-                    # Só marca como consultado se a busca rodou com sucesso
+                    # Marca como consultado tanto no disco quanto em memória
                     self.repository.marcar_como_consultado(tel_raw)
+                    ja_processados.add(tel_limpo)
+                    consultados_na_sessao.add(tel_limpo)
                     idx_tel += 1
 
                 except LimiteConsultasExcedido as e:
@@ -93,7 +106,7 @@ class ConsultaEngine:
                             self.client.alternar_conta(proxima_conta)
                             log.info(f"✔ Nova conta pronta! Retestando o telefone {tel_fmt}...")
                             time.sleep(2)
-                            # Não incrementa idx_tel: repete a busca do mesmo telefone com a nova conta
+                            # Não incrementa idx_tel: repete a busca do mesmo telefone na nova conta
                             continue
                         except Exception as err_troca:
                             log.error(f"Erro ao alternar para conta '{proxima_conta.usuario}': {err_troca}")

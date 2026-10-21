@@ -156,7 +156,8 @@ class CorbanClient:
         """
         Pesquisa o telefone no Corban e extrai o(s) CPF(s) encontrados.
         Retorna lista de CPFs com formatação 000.000.000-00.
-        Lança LimiteConsultasExcedido se o portal acusar limite diário ou atingir timeout.
+        Se aparecer 'Nenhum cliente encontrado', encerra imediatamente sem lançar erro de limite.
+        Lança LimiteConsultasExcedido se o portal acusar limite diário explícito ou tempo limite sem resposta.
         """
         page = self._page
         tel_limpo = limpar_telefone(telefone_raw)
@@ -178,48 +179,78 @@ class CorbanClient:
 
             while time.time() - tempo_inicio < self.config.timeout_resposta:
                 resultado = page.evaluate("""() => {
+                    // 1. Verifica se apareceu a célula indicando que nenhum cliente foi encontrado
+                    // Ex: <td colspan="3" style="text-align: center; height: 25px;">Nenhum cliente encontrado</td>
+                    const tds = Array.from(document.querySelectorAll('td'));
+                    const tdNenhum = tds.find(td => {
+                        const txt = (td.innerText || '').toLowerCase().trim();
+                        return txt.includes('nenhum cliente encontrado') || 
+                               txt.includes('nenhum registro encontrado') ||
+                               txt.includes('cliente não encontrado');
+                    });
+
+                    if (tdNenhum) {
+                        return { status: 'nao_encontrado', cpfs: [], alertas: [] };
+                    }
+
+                    // 2. Procura linhas que contenham resultados de clientes com links de ação
                     const linhas = Array.from(document.querySelectorAll('tr')).filter(tr => {
                         const links = tr.querySelectorAll('a[onclick*="levarcodigoRapido2"], a.btn-primary');
                         return links.length > 0;
                     });
 
-                    if (linhas.length === 0) {
-                        const alertas = Array.from(
-                            document.querySelectorAll('.swal2-content, .toast-message, .alert, .bootbox-body, .swal2-title')
-                        ).map(el => el.innerText.trim());
-                        return { status: 'aguardando', linhas: [], alertas: alertas };
-                    }
+                    if (linhas.length > 0) {
+                        let colCpfIndex = 0;
+                        const ths = Array.from(document.querySelectorAll('th')).map(th => th.innerText.toLowerCase().trim());
+                        const idxTh = ths.findIndex(t => t.includes('cpf'));
+                        if (idxTh !== -1) {
+                            colCpfIndex = idxTh;
+                        }
 
-                    // Determina a coluna do CPF
-                    let colCpfIndex = 0;
-                    const ths = Array.from(document.querySelectorAll('th')).map(th => th.innerText.toLowerCase().trim());
-                    const idxTh = ths.findIndex(t => t.includes('cpf'));
-                    if (idxTh !== -1) {
-                        colCpfIndex = idxTh;
-                    }
+                        const dados = [];
+                        for (const tr of linhas) {
+                            const tdsRow = tr.querySelectorAll('td');
+                            if (tdsRow.length >= 2) {
+                                const txt = tdsRow[colCpfIndex] ? tdsRow[colCpfIndex].innerText.trim() : '';
+                                if (txt && !txt.toLowerCase().includes('nenhum')) {
+                                    dados.push(txt);
+                                }
+                            }
+                        }
 
-                    const dados = [];
-                    for (const tr of linhas) {
-                        const tds = tr.querySelectorAll('td');
-                        if (tds.length >= 2) {
-                            const txt = tds[colCpfIndex] ? tds[colCpfIndex].innerText.trim() : '';
-                            if (txt) dados.push(txt);
+                        if (dados.length > 0) {
+                            return { status: 'concluido', cpfs: dados, alertas: [] };
                         }
                     }
 
-                    return { status: 'concluido', cpfs: dados, alertas: [] };
+                    // 3. Verifica alertas modais (swal, toast, alert)
+                    const alertas = Array.from(
+                        document.querySelectorAll('.swal2-content, .toast-message, .alert, .bootbox-body, .swal2-title')
+                    ).map(el => el.innerText.trim());
+
+                    if (alertas.some(a => a.toLowerCase().includes('nenhum') || a.toLowerCase().includes('não encontrado'))) {
+                        return { status: 'nao_encontrado', cpfs: [], alertas: alertas };
+                    }
+
+                    return { status: 'aguardando', linhas: [], alertas: alertas };
                 }""")
 
                 alertas = resultado.get("alertas", [])
 
-                # 1. Verifica se houve alerta explícito de limite diário atingido
+                # Alerta explícito de limite diário de consultas atingido
                 if any("limite" in a.lower() for a in alertas):
                     log.warning(f"  [ALERTA DETECTADO] Limite diário informado pelo sistema: {alertas}")
                     raise LimiteConsultasExcedido(
                         f"Limite diário atingido na conta '{self._credencial_ativa.usuario}'."
                     )
 
-                # 2. Verifica se houve sucesso com linhas de CPF retornadas
+                # Cliente não encontrado (td: "Nenhum cliente encontrado") -> Retorna lista vazia imediatamente
+                if resultado.get("status") == "nao_encontrado":
+                    log.info(f"  [-] Nenhum cliente encontrado no sistema para este número.")
+                    resultado_obtido = True
+                    break
+
+                # Sucesso com CPF(s) retornados na tabela
                 if resultado.get("status") == "concluido" and resultado.get("cpfs"):
                     for raw_cpf in resultado["cpfs"]:
                         c_limpo = limpar_cpf(raw_cpf)
@@ -230,15 +261,9 @@ class CorbanClient:
                     resultado_obtido = True
                     break
 
-                # 3. Verifica se houve aviso de nenhum cliente retornado
-                if any("nenhum" in a.lower() or "não encontrado" in a.lower() for a in alertas):
-                    log.info("  Aviso: Nenhum cliente retornado para este telefone.")
-                    resultado_obtido = True
-                    break
-
                 page.wait_for_timeout(600)
 
-            # Se excedeu o tempo sem resposta e sem aviso de nenhum cliente, indica limite de requisições
+            # Se excedeu o tempo sem resposta e sem a mensagem de nenhum cliente, indica lentidão ou limite do servidor
             if not resultado_obtido:
                 raise LimiteConsultasExcedido(
                     f"Tempo limite de {self.config.timeout_resposta}s excedido aguardando resposta para o telefone {telefone_raw}. "
