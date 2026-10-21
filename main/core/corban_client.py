@@ -171,7 +171,22 @@ class CorbanClient:
             campo.type(tel_limpo, delay=40)
             page.wait_for_timeout(300)
 
+            # Limpa resultados ou avisos anteriores do modal antes de disparar a nova busca
+            try:
+                page.evaluate("""() => {
+                    const btn = document.querySelector('#btnBuscarcpfPorCliente');
+                    const modal = btn ? btn.closest('.modal, .modal-content, .modal-body, div') : null;
+                    if (modal) {
+                        modal.querySelectorAll('tr').forEach(tr => {
+                            if (tr.querySelector('td')) tr.remove();
+                        });
+                    }
+                }""")
+            except Exception:
+                pass
+
             page.click("#btnBuscarcpfPorCliente")
+            page.wait_for_timeout(800)
 
             tempo_inicio = time.time()
             cpfs_encontrados: list[str] = []
