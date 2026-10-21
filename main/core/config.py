@@ -1,13 +1,10 @@
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
-try:
-    from core.domain import Credencial
-except ImportError:
-    from .domain import Credencial
-
+from core.domain import Credencial
 from dotenv import find_dotenv, load_dotenv
 
 
