@@ -48,6 +48,20 @@ class CorbanClient:
         """Retorna a credencial atualmente em uso."""
         return self._credencial_ativa
 
+    @property
+    def page(self) -> Page:
+        """Retorna a página ativa do navegador ou lança exceção se não estiver inicializada."""
+        if self._page is None:
+            raise RuntimeError("Página do navegador não inicializada. Chame iniciar() antes.")
+        return self._page
+
+    @property
+    def browser(self) -> Browser:
+        """Retorna a instância do navegador ou lança exceção se não estiver inicializada."""
+        if self._browser is None:
+            raise RuntimeError("Navegador não inicializado. Chame iniciar() antes.")
+        return self._browser
+
     def __enter__(self) -> "CorbanClient":
         self.iniciar()
         return self
@@ -66,8 +80,12 @@ class CorbanClient:
 
     def _criar_contexto_e_logar(self) -> None:
         """Cria um novo contexto isolado de navegação e efetua login."""
-        self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
+        self._context = self.browser.new_context(viewport={"width": 1280, "height": 800})
         self._page = self._context.new_page()
+
+        # Aceita automaticamente diálogos do navegador, como confirmação de sessão já aberta
+        self._page.on("dialog", lambda dialog: dialog.accept())
+
         self._fazer_login()
 
     def alternar_conta(self, nova_credencial: Credencial) -> None:
@@ -100,7 +118,7 @@ class CorbanClient:
 
     def _fazer_login(self) -> None:
         """Realiza autenticação no portal Corban com a credencial ativa."""
-        page = self._page
+        page = self.page
         log.info(f"Acessando o portal CORBAN como '{self._credencial_ativa.usuario}'…")
         page.goto(self.config.site_url, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle", timeout=30_000)
@@ -110,8 +128,10 @@ class CorbanClient:
         page.fill("#password", self._credencial_ativa.senha)
         page.click("#button-sigin")
 
+        # Aguarda a transição de navegação do login para o painel principal
         try:
-            page.wait_for_load_state("networkidle", timeout=20_000)
+            page.wait_for_url("**/index.php/**", timeout=20_000)
+            page.wait_for_load_state("domcontentloaded", timeout=15_000)
         except PlaywrightTimeout:
             pass
         page.wait_for_timeout(2_000)
@@ -126,7 +146,7 @@ class CorbanClient:
 
     def _abrir_modal_busca_telefone(self) -> None:
         """Garante que a caixa de pesquisa de telefone esteja aberta e visível."""
-        page = self._page
+        page = self.page
         seletor_input = "#telefoneBuscaTelefoneConsultaRapida"
         try:
             inp = page.locator(seletor_input)
@@ -135,22 +155,45 @@ class CorbanClient:
         except Exception:
             pass
 
-        # Clica no botão com ícone de telefone
+        # Clica no botão com ícone de telefone ou abre via JavaScript/Bootstrap
         seletor_botao = (
             "button[onclick*='buscarPorIdRapida'], "
             "button[data-original-title*='telefone'], "
             "button:has(i.fa-phone)"
         )
-        try:
-            btn = page.locator(seletor_botao).first
-            if btn.is_visible():
-                btn.click()
-            else:
-                page.evaluate("if (typeof buscarPorIdRapida === 'function') buscarPorIdRapida();")
-        except Exception:
-            page.evaluate("if (typeof buscarPorIdRapida === 'function') buscarPorIdRapida();")
 
-        page.wait_for_selector(seletor_input, state="visible", timeout=8_000)
+        for tentativa in range(1, 4):
+            try:
+                btn = page.locator(seletor_botao).first
+                if btn.is_visible():
+                    btn.click()
+                else:
+                    page.evaluate("""() => {
+                        if (typeof buscarPorIdRapida === 'function') {
+                            buscarPorIdRapida();
+                        } else if (typeof $ !== 'undefined' && $('#modal-buscaid-rapida').length) {
+                            $('#modal-buscaid-rapida').modal('show');
+                        }
+                    }""")
+            except Exception as e:
+                log.debug(f"Aviso na tentativa {tentativa} de abrir modal: {e}")
+
+            try:
+                page.wait_for_selector(seletor_input, state="visible", timeout=4_000)
+                return
+            except PlaywrightTimeout:
+                log.warning(f"Modal não abriu na tentativa {tentativa}/3. Forçando via Bootstrap/jQuery...")
+                try:
+                    page.evaluate("""() => {
+                        if (typeof $ !== 'undefined') {
+                            $('#modal-buscaid-rapida').modal('show');
+                        }
+                    }""")
+                except Exception:
+                    pass
+                page.wait_for_timeout(1_000)
+
+        page.wait_for_selector(seletor_input, state="visible", timeout=5_000)
 
     def buscar_cpfs_por_telefone(self, telefone_raw: str) -> list[str]:
         """
@@ -159,7 +202,7 @@ class CorbanClient:
         Se aparecer 'Nenhum cliente encontrado', encerra imediatamente sem lançar erro de limite.
         Lança LimiteConsultasExcedido se o portal acusar limite diário explícito ou tempo limite sem resposta.
         """
-        page = self._page
+        page = self.page
         tel_limpo = limpar_telefone(telefone_raw)
 
         try:
@@ -261,7 +304,7 @@ class CorbanClient:
 
                 # Cliente não encontrado (td: "Nenhum cliente encontrado") -> Retorna lista vazia imediatamente
                 if resultado.get("status") == "nao_encontrado":
-                    log.info(f"  [-] Nenhum cliente encontrado no sistema para este número.")
+                    log.info("  [-] Nenhum cliente encontrado no sistema para este número.")
                     resultado_obtido = True
                     break
 

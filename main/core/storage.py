@@ -47,11 +47,12 @@ class PhoneRepository:
 
             wb = openpyxl.load_workbook(self.arquivo_entrada, read_only=True, data_only=True)
             ws = wb.active
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if row and row[0] is not None:
-                    val = str(row[0]).strip()
-                    if val:
-                        tels.append(val)
+            if ws is not None:
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if row and row[0] is not None:
+                        val = str(row[0]).strip()
+                        if val:
+                            tels.append(val)
             wb.close()
         else:
             with open(self.arquivo_entrada, "r", encoding="utf-8-sig", errors="replace") as f:

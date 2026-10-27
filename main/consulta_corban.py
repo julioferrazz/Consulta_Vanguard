@@ -23,7 +23,7 @@ from core.storage import PhoneRepository
 # ── Configuração de Logging ─────────────────────────────────
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        getattr(sys.stdout, "reconfigure")(encoding="utf-8", errors="backslashreplace")
     except Exception:
         pass
 
@@ -54,9 +54,15 @@ def main() -> None:
         log.error(f"Erro ao inicializar arquivos: {e}")
         sys.exit(1)
 
-    with CorbanClient(config) as client:
-        engine = ConsultaEngine(config=config, repository=repository, client=client)
-        engine.executar()
+    try:
+        with CorbanClient(config) as client:
+            engine = ConsultaEngine(config=config, repository=repository, client=client)
+            engine.executar()
+    except KeyboardInterrupt:
+        log.info("Execução cancelada pelo usuário.")
+    except Exception as e:
+        log.exception(f"Erro fatal na execução: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
