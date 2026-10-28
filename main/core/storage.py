@@ -4,16 +4,13 @@ from pathlib import Path
 from typing import List, Set
 
 from core.config import AppConfig
-from core.domain import ResultadoClienteFiltro, formatar_cpf, limpar_cpf
+from core.domain import ResultadoClienteFiltro, limpar_cpf
 
 log = logging.getLogger(__name__)
 
 
 class CpfFilterRepository:
-    """
-    Repositório de dados para leitura de CPFs e persistência de clientes filtrados.
-    Isola todas as operações de persistência em CSV e arquivo de histórico.
-    """
+    """Repositório de dados para leitura de CPFs e persistência de clientes filtrados."""
 
     CAMPOS_SAIDA = ["CPF", "Idade", "Tel 1", "Tel 2", "Parcelas Pagas"]
 
@@ -28,15 +25,11 @@ class CpfFilterRepository:
         if not self.arquivo_entrada.exists():
             raise FileNotFoundError(
                 f"Arquivo de entrada não encontrado: '{self.arquivo_entrada}'. "
-                f"Verifique a variável ARQUIVO_ENTRADA no arquivo .env."
+                f"Defina ARQUIVO_ENTRADA no arquivo .env."
             )
-
         if not self.arquivo_saida.exists():
             with open(self.arquivo_saida, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(
-                    f, fieldnames=self.CAMPOS_SAIDA, quoting=csv.QUOTE_MINIMAL
-                )
-                writer.writeheader()
+                csv.DictWriter(f, fieldnames=self.CAMPOS_SAIDA, delimiter=";", quoting=csv.QUOTE_MINIMAL).writeheader()
             log.info(f"Arquivo de saída criado: '{self.arquivo_saida.name}'")
 
         if not self.arquivo_historico.exists():
@@ -47,125 +40,82 @@ class CpfFilterRepository:
         if not self.arquivo_entrada.exists():
             raise FileNotFoundError(f"Arquivo de entrada não encontrado: '{self.arquivo_entrada}'")
 
-        cpfs_brutos: List[str] = []
-        ext = self.arquivo_entrada.suffix.lower()
-
-        if ext in (".xlsx", ".xls"):
+        brutos: List[str] = []
+        if self.arquivo_entrada.suffix.lower() in (".xlsx", ".xls"):
             import openpyxl
-
             wb = openpyxl.load_workbook(self.arquivo_entrada, read_only=True, data_only=True)
-            ws = wb.active
-            if ws is not None:
-                for row in ws.iter_rows(min_row=1, values_only=True):
-                    if row and row[0] is not None:
-                        val = str(row[0]).strip()
-                        if val:
-                            cpfs_brutos.append(val)
+            if ws := wb.active:
+                brutos = [str(r[0]).strip() for r in ws.iter_rows(min_row=1, values_only=True) if r and r[0] is not None]
             wb.close()
         else:
             with open(self.arquivo_entrada, "r", encoding="utf-8-sig", errors="replace") as f:
-                primeira_linha = f.readline()
-                delimitador = ";" if ";" in primeira_linha else ","
+                delimitador = ";" if ";" in f.readline() else ","
                 f.seek(0)
+                brutos = [r[0].strip() for r in csv.reader(f, delimiter=delimitador) if r and r[0].strip().lower() != "cpf"]
 
-                leitor = csv.reader(f, delimiter=delimitador)
-                for linha in leitor:
-                    if linha and linha[0].strip():
-                        val = linha[0].strip()
-                        if val.lower() == "cpf":
-                            continue
-                        cpfs_brutos.append(val)
-
+        cpfs: List[str] = []
         vistos: Set[str] = set()
-        cpfs_unicos: List[str] = []
-        for c in cpfs_brutos:
-            c_limpo = limpar_cpf(c)
-            if len(c_limpo) == 11 and c_limpo not in vistos:
-                vistos.add(c_limpo)
-                cpfs_unicos.append(c_limpo)
+        for c in brutos:
+            if len(limpo := limpar_cpf(c)) == 11 and limpo not in vistos:
+                vistos.add(limpo)
+                cpfs.append(limpo)
 
-        log.info(f"{len(cpfs_unicos)} CPF(s) válido(s) carregado(s) de '{self.arquivo_entrada.name}'")
-        return cpfs_unicos
+        log.info(f"{len(cpfs)} CPF(s) válido(s) carregado(s) de '{self.arquivo_entrada.name}'")
+        return cpfs
 
     def carregar_cpfs_processados(self) -> Set[str]:
-        """Retorna conjunto de CPFs já processados (lendo tanto resultados.csv quanto o histórico)."""
+        """Retorna conjunto de CPFs já processados (tanto no CSV de saída quanto no histórico)."""
         processados: Set[str] = set()
 
-        # 1. Lê os CPFs aprovados já salvos no arquivo de saída
         if self.arquivo_saida.exists():
             try:
                 with open(self.arquivo_saida, "r", encoding="utf-8-sig", errors="replace") as f:
-                    primeira_linha = f.readline()
-                    delimitador = ";" if ";" in primeira_linha else ","
+                    delim = ";" if ";" in f.readline() else ","
                     f.seek(0)
-
-                    reader = csv.DictReader(f, delimiter=delimitador)
-                    for row in reader:
-                        cpf = limpar_cpf(row.get("CPF", ""))
-                        if cpf:
-                            processados.add(cpf)
+                    processados.update(limpar_cpf(r.get("CPF", "")) for r in csv.DictReader(f, delimiter=delim) if r.get("CPF"))
             except Exception as e:
-                log.warning(f"Aviso ao ler arquivo de saída existente: {e}")
+                log.warning(f"Aviso ao ler saída: {e}")
 
-        # 2. Lê os CPFs do histórico geral (inclusive os reprovados pelos filtros)
         if self.arquivo_historico.exists():
             try:
                 with open(self.arquivo_historico, "r", encoding="utf-8", errors="replace") as f:
-                    for linha in f:
-                        cpf = limpar_cpf(linha.strip())
-                        if cpf:
-                            processados.add(cpf)
+                    processados.update(limpar_cpf(l.strip()) for l in f if l.strip())
             except Exception as e:
-                log.warning(f"Aviso ao ler histórico geral: {e}")
+                log.warning(f"Aviso ao ler histórico: {e}")
 
+        processados.discard("")
         if processados:
             log.info(f"{len(processados)} CPF(s) já consultados anteriormente — serão pulados.")
-
         return processados
 
     def obter_pendentes(self) -> List[str]:
-        """Retorna a lista de CPFs pendentes para consulta nesta sessão."""
+        """Retorna a lista de CPFs pendentes limitada pela configuração."""
         todos = self.carregar_cpfs_entrada()
-        processados = self.carregar_cpfs_processados()
-
-        pendentes = [c for c in todos if c not in processados]
+        ja_feitos = self.carregar_cpfs_processados()
+        pendentes = [c for c in todos if c not in ja_feitos]
 
         if len(pendentes) > self.config.limite_cpfs:
-            log.info(
-                f"{len(pendentes)} CPF(s) pendentes — limitando a {self.config.limite_cpfs} nesta execução."
-            )
+            log.info(f"{len(pendentes)} CPF(s) pendentes — limitando a {self.config.limite_cpfs} nesta execução.")
             pendentes = pendentes[: self.config.limite_cpfs]
-
         return pendentes
 
     def marcar_como_consultado(self, cpf_raw: str) -> None:
-        """Registra o CPF consultado no arquivo de histórico para não reprocessar."""
-        cpf_limpo = limpar_cpf(cpf_raw)
-        if not cpf_limpo:
-            return
-        try:
-            with open(self.arquivo_historico, "a", encoding="utf-8") as f:
-                f.write(f"{cpf_limpo}\n")
-        except Exception as e:
-            log.debug(f"Aviso ao registrar CPF no histórico: {e}")
+        """Registra o CPF no histórico para prevenir reprocessamento."""
+        if limpo := limpar_cpf(cpf_raw):
+            try:
+                with open(self.arquivo_historico, "a", encoding="utf-8") as f:
+                    f.write(f"{limpo}\n")
+            except Exception as e:
+                log.debug(f"Aviso ao registrar histórico: {e}")
 
     def salvar_resultados(self, novos: List[ResultadoClienteFiltro]) -> None:
-        """Salva novos registros aprovados no arquivo CSV de saída."""
+        """Salva registros de clientes aprovados no CSV de saída."""
         if not novos:
             return
-
-        arquivo_existe = self.arquivo_saida.exists() and self.arquivo_saida.stat().st_size > 0
-
+        novo_arq = not self.arquivo_saida.exists() or self.arquivo_saida.stat().st_size == 0
         with open(self.arquivo_saida, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=self.CAMPOS_SAIDA,
-                delimiter=";",
-                quoting=csv.QUOTE_MINIMAL,
-            )
-            if not arquivo_existe:
+            writer = csv.DictWriter(f, fieldnames=self.CAMPOS_SAIDA, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+            if novo_arq:
                 writer.writeheader()
-            for r in novos:
-                writer.writerow(r.para_dicionario())
-
+            writer.writerows(r.para_dicionario() for r in novos)
         log.info(f"{len(novos)} novo(s) registro(s) salvo(s) em '{self.arquivo_saida.name}'")

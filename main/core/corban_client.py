@@ -26,19 +26,11 @@ log = logging.getLogger(__name__)
 
 
 class CorbanClient:
-    """
-    Adapter de automação web para o portal Sistema Corban.
-    Encapsula o ciclo de vida do Playwright, autenticação, rotação de contas,
-    pesquisa de CPFs e aplicação dos filtros de idade, empréstimo e telefones.
-    """
+    """Adapter de automação web Playwright para o portal Sistema Corban."""
 
     def __init__(self, config: AppConfig, credencial_inicial: Optional[Credencial] = None):
         self.config = config
-        self._credencial_ativa = (
-            credencial_inicial
-            if credencial_inicial
-            else (config.contas[0] if config.contas else Credencial("", ""))
-        )
+        self._credencial_ativa = credencial_inicial or (config.contas[0] if config.contas else Credencial("", ""))
         self._pw: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -46,19 +38,16 @@ class CorbanClient:
 
     @property
     def credencial_ativa(self) -> Credencial:
-        """Retorna a credencial atualmente em uso."""
         return self._credencial_ativa
 
     @property
     def page(self) -> Page:
-        """Retorna a página ativa do navegador ou lança exceção se não estiver inicializada."""
         if self._page is None:
-            raise RuntimeError("Página do navegador não inicializada. Chame iniciar() antes.")
+            raise RuntimeError("Página não inicializada. Chame iniciar() antes.")
         return self._page
 
     @property
     def browser(self) -> Browser:
-        """Retorna a instância do navegador ou lança exceção se não estiver inicializada."""
         if self._browser is None:
             raise RuntimeError("Navegador não inicializado. Chame iniciar() antes.")
         return self._browser
@@ -71,62 +60,50 @@ class CorbanClient:
         self.fechar()
 
     def iniciar(self) -> None:
-        """Inicia o navegador Chromium e realiza a autenticação inicial."""
+        """Inicia o Chromium e realiza autenticação inicial."""
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=not self.config.modo_visivel,
-            slow_mo=80,
-        )
+        self._browser = self._pw.chromium.launch(headless=not self.config.modo_visivel, slow_mo=80)
         self._criar_contexto_e_logar()
 
     def _criar_contexto_e_logar(self) -> None:
-        """Cria um contexto isolado no navegador e efetua o login no portal."""
+        """Cria contexto isolado e efetua login aceitando alertas automáticos."""
         self._context = self.browser.new_context(viewport={"width": 1280, "height": 800})
         self._page = self._context.new_page()
-
-        # Aceita automaticamente diálogos do navegador, como confirmação de sessão já aberta
         self._page.on("dialog", lambda dialog: dialog.accept())
-
         self._fazer_login()
 
     def alternar_conta(self, nova_credencial: Credencial) -> None:
-        """Alterna a conta ativa fechando o contexto anterior e efetuando um login limpo."""
+        """Alterna a conta ativa fechando o contexto anterior e logando com nova credencial."""
         log.info(f"🔄 Alternando conta de '{self._credencial_ativa.usuario}' para '{nova_credencial.usuario}'...")
-        try:
-            if self._context:
+        if self._context:
+            try:
                 self._context.close()
-        except Exception as e:
-            log.debug(f"Aviso ao fechar contexto anterior: {e}")
-
+            except Exception:
+                pass
         self._credencial_ativa = nova_credencial
         self._criar_contexto_e_logar()
         log.info(f"✔ Sessão iniciada com sucesso na conta '{nova_credencial.usuario}'.")
 
     def fechar(self) -> None:
-        """Encerra a sessão do navegador e libera os recursos alocados."""
-        try:
-            if self._context:
-                self._context.close()
-            if self._browser:
-                self._browser.close()
-            if self._pw:
-                self._pw.stop()
-        except Exception as e:
-            log.debug(f"Aviso ao fechar navegador: {e}")
+        """Encerra a sessão e libera recursos do navegador."""
+        for recurso in (self._context, self._browser, self._pw):
+            if recurso:
+                try:
+                    recurso.close() if hasattr(recurso, "close") else recurso.stop()
+                except Exception:
+                    pass
 
     def _fazer_login(self) -> None:
-        """Realiza autenticação no portal Corban com a credencial ativa."""
+        """Realiza autenticação no portal Corban."""
         page = self.page
         log.info(f"Acessando o portal CORBAN como '{self._credencial_ativa.usuario}'…")
         page.goto(self.config.site_url, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle", timeout=30_000)
 
-        log.info("Preenchendo credenciais…")
         page.fill("#exten", self._credencial_ativa.usuario)
         page.fill("#password", self._credencial_ativa.senha)
         page.click("#button-sigin")
 
-        # Aguarda a transição de navegação do login para o painel principal
         try:
             page.wait_for_url("**/index.php/**", timeout=20_000)
             page.wait_for_load_state("domcontentloaded", timeout=15_000)
@@ -135,11 +112,7 @@ class CorbanClient:
         page.wait_for_timeout(2_000)
 
         if page.query_selector("#button-sigin") or "login" in page.url.lower():
-            raise RuntimeError(
-                f"Falha no login com o usuário '{self._credencial_ativa.usuario}'! "
-                f"Verifique as credenciais no arquivo .env."
-            )
-
+            raise RuntimeError(f"Falha no login com o usuário '{self._credencial_ativa.usuario}'!")
         log.info(f"✔ Login realizado com sucesso como '{self._credencial_ativa.usuario}'.")
 
     def _buscar_cpf(self, cpf_limpo: str) -> None:
@@ -156,173 +129,115 @@ class CorbanClient:
         campo.fill("")
         campo.type(cpf_limpo, delay=40)
         page.wait_for_timeout(300)
-
         page.click("#btnConsultaClienteRapido")
         page.wait_for_timeout(500)
 
     def _desanonimizar_telefones(self) -> None:
-        """Clica no botão de desanonimização de telefones para exibir os números reais."""
-        page = self.page
+        """Dispara a liberação dos números ocultos de telefone."""
         try:
-            btn = page.query_selector("#btnHideOrShowTelefone")
-            if btn and btn.is_visible():
+            if (btn := self.page.query_selector("#btnHideOrShowTelefone")) and btn.is_visible():
                 btn.click()
-                page.wait_for_timeout(800)
+                self.page.wait_for_timeout(800)
             else:
-                page.evaluate("""() => {
-                    if (typeof abrirCamposTelefones === 'function') {
-                        abrirCamposTelefones();
-                    }
-                }""")
-                page.wait_for_timeout(500)
+                self.page.evaluate("() => typeof abrirCamposTelefones === 'function' && abrirCamposTelefones()")
+                self.page.wait_for_timeout(500)
         except Exception as e:
             log.debug(f"Aviso ao liberar telefones: {e}")
 
     def _extrair_e_filtrar_beneficio(self, cpf_fmt: str) -> Optional[ResultadoClienteFiltro]:
-        """
-        Extrai as informações da página do benefício e aplica os filtros:
-        1. Idade (< idade_limite)
-        2. Parcelas pagas no último empréstimo (<= parcelas_pagas_limite)
-        3. Telefones 1 e 2
-        """
+        """Extrai dados do benefício e valida filtros de idade e parcelas pagas."""
         page = self.page
 
-        # ── 1. Extração da data/idade ──────────────────────────────
-        nasc_raw = ""
-        try:
-            nasc_el = page.query_selector("#cliNascimento")
-            if nasc_el:
-                nasc_raw = nasc_el.inner_text().strip()
-        except Exception as e:
-            log.debug(f"Erro ao buscar #cliNascimento: {e}")
-
+        # 1. Filtro de Idade
+        nasc_el = page.query_selector("#cliNascimento")
+        nasc_raw = nasc_el.inner_text().strip() if nasc_el else ""
         idade = calcular_idade(nasc_raw)
 
         if idade is None:
-            log.warning(f"     ⚠ Não foi possível determinar a idade (lido: '{nasc_raw}'). Pulando benefício.")
+            log.warning(f"     ⚠ Idade não identificada ('{nasc_raw}'). Pulando benefício.")
             return None
-
         if idade >= self.config.idade_limite:
-            log.info(f"     [Filtro Reprovado] Idade {idade} anos >= limite de {self.config.idade_limite} anos. Pulando.")
+            log.info(f"     [Filtro Reprovado] Idade {idade} anos >= {self.config.idade_limite}. Pulando.")
             return None
-
         log.info(f"     [Filtro OK] Idade: {idade} anos (< {self.config.idade_limite})")
 
-        # ── 2. Extração das parcelas pagas no último empréstimo ────
-        pagas = None
-        try:
-            res_pagas = page.evaluate("""() => {
-                const inp = document.querySelector('#linhaBanco--pagas_0');
-                if (inp && inp.value !== '') {
-                    const num = parseInt(inp.value.trim(), 10);
-                    if (!isNaN(num)) return num;
-                }
-
-                const linha0 = document.querySelector('#titlelinha_0') || document.querySelector('.portlet-banco');
-                if (linha0) {
-                    const txt = linha0.innerText || '';
-                    const m = /(\\d+)\\s*pagas/i.exec(txt);
-                    if (m) return parseInt(m[1], 10);
-                }
-
-                return null;
-            }""")
-            if res_pagas is not None:
-                pagas = int(res_pagas)
-        except Exception as e:
-            log.debug(f"Erro ao extrair parcelas pagas: {e}")
+        # 2. Filtro de Parcelas Pagas no Último Empréstimo
+        pagas = page.evaluate("""() => {
+            const inp = document.querySelector('#linhaBanco--pagas_0');
+            if (inp && inp.value !== '') {
+                const num = parseInt(inp.value.trim(), 10);
+                if (!isNaN(num)) return num;
+            }
+            const linha0 = document.querySelector('#titlelinha_0') || document.querySelector('.portlet-banco');
+            if (linha0) {
+                const m = /(\\d+)\\s*pagas/i.exec(linha0.innerText || '');
+                if (m) return parseInt(m[1], 10);
+            }
+            return null;
+        }""")
 
         if pagas is None:
             if self.config.pular_se_sem_emprestimo:
-                log.info("     [Filtro Reprovado] Nenhum empréstimo ativo encontrado no benefício. Pulando.")
+                log.info("     [Filtro Reprovado] Nenhum empréstimo ativo encontrado. Pulando.")
                 return None
             pagas = 0
 
         if pagas > self.config.parcelas_pagas_limite:
-            log.info(
-                f"     [Filtro Reprovado] {pagas} parcelas pagas no último empréstimo "
-                f"(limite é até {self.config.parcelas_pagas_limite} pagas). Pulando."
-            )
+            log.info(f"     [Filtro Reprovado] {pagas} parcelas pagas > limite {self.config.parcelas_pagas_limite}. Pulando.")
             return None
-
         log.info(f"     [Filtro OK] Parcelas Pagas: {pagas} (<= {self.config.parcelas_pagas_limite})")
 
-        # ── 3. Extração dos dois telefones ─────────────────────────
+        # 3. Extração e Formatação dos Telefones
         self._desanonimizar_telefones()
+        tels = page.evaluate("""() => {
+            const getVal = (hotNum, selInp) => {
+                const div = document.querySelector(`[data-telefonehot="${hotNum}"]`);
+                const inp = document.querySelector(selInp);
+                if (div && div.innerText.trim() && !div.innerText.includes('*')) return div.innerText.trim();
+                if (inp && inp.value.trim()) return inp.value.trim();
+                return div ? div.innerText.trim() : '';
+            };
+            return {
+                t1: getVal(1, '#telefonesHot-1, #telhot-1'),
+                t2: getVal(2, '#telefonesHot-2')
+            };
+        }""") or {}
 
-        tel1_raw = "N/A"
-        tel2_raw = "N/A"
-
-        try:
-            tels = page.evaluate("""() => {
-                let t1 = '';
-                let t2 = '';
-
-                const divTel1 = document.querySelector('[data-telefonehot="1"]');
-                const inpTel1 = document.querySelector('#telefonesHot-1') || document.querySelector('#telhot-1');
-                if (divTel1 && divTel1.innerText.trim() && !divTel1.innerText.includes('*')) {
-                    t1 = divTel1.innerText.trim();
-                } else if (inpTel1 && inpTel1.value.trim()) {
-                    t1 = inpTel1.value.trim();
-                } else if (divTel1) {
-                    t1 = divTel1.innerText.trim();
-                }
-
-                const divTel2 = document.querySelector('[data-telefonehot="2"]');
-                const inpTel2 = document.querySelector('#telefonesHot-2');
-                if (divTel2 && divTel2.innerText.trim() && !divTel2.innerText.includes('*')) {
-                    t2 = divTel2.innerText.trim();
-                } else if (inpTel2 && inpTel2.value.trim()) {
-                    t2 = inpTel2.value.trim();
-                } else if (divTel2) {
-                    t2 = divTel2.innerText.trim();
-                }
-
-                return { t1, t2 };
-            }""")
-            if tels:
-                tel1_raw = tels.get("t1", "N/A") or "N/A"
-                tel2_raw = tels.get("t2", "N/A") or "N/A"
-        except Exception as e:
-            log.debug(f"Erro ao capturar telefones: {e}")
-
-        tel1_fmt = formatar_telefone(tel1_raw)
-        tel2_fmt = formatar_telefone(tel2_raw)
-
+        tel1_fmt = formatar_telefone(tels.get("t1", "N/A"))
+        tel2_fmt = formatar_telefone(tels.get("t2", "N/A"))
         log.info(f"     [Telefones] Tel 1: {tel1_fmt}  |  Tel 2: {tel2_fmt}")
 
-        return ResultadoClienteFiltro(
-            cpf=cpf_fmt,
-            idade=idade,
-            tel1=tel1_fmt,
-            tel2=tel2_fmt,
-            parcelas_pagas=pagas,
-        )
+        return ResultadoClienteFiltro(cpf=cpf_fmt, idade=idade, tel1=tel1_fmt, tel2=tel2_fmt, parcelas_pagas=pagas)
+
+    def _recuperar_posicao(self, cpf_limpo: str, mais_itens: bool) -> None:
+        """Retorna para a tela de listagem de benefícios com segurança."""
+        try:
+            self.page.go_back()
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=15_000)
+            except PlaywrightTimeout:
+                pass
+            self.page.wait_for_timeout(1_500)
+            if mais_itens:
+                self._buscar_cpf(cpf_limpo)
+        except Exception:
+            pass
 
     def buscar_e_filtrar_por_cpf(self, cpf_raw: str) -> List[ResultadoClienteFiltro]:
-        """
-        Consulta o CPF no Corban, percorre seus benefícios e aplica os filtros.
-        Retorna lista de clientes aprovados.
-        Lança LimiteConsultasExcedido se o portal acusar limite diário.
-        """
+        """Consulta o CPF no Corban, percorre benefícios e retorna clientes aprovados."""
         page = self.page
         cpf_limpo = limpar_cpf(cpf_raw)
         cpf_fmt = formatar_cpf(cpf_limpo)
-
         resultados: List[ResultadoClienteFiltro] = []
 
         try:
             self._buscar_cpf(cpf_limpo)
 
-            alertas = page.evaluate("""() => {
-                return Array.from(
-                    document.querySelectorAll('.swal2-content, .toast-message, .alert, .bootbox-body, .swal2-title')
-                ).map(el => (el.innerText || '').trim());
-            }""")
+            alertas = page.evaluate("""() => Array.from(
+                document.querySelectorAll('.swal2-content, .toast-message, .alert, .bootbox-body, .swal2-title')
+            ).map(el => (el.innerText || '').trim())""")
             if any("limite" in a.lower() for a in alertas):
-                raise LimiteConsultasExcedido(
-                    f"Limite diário atingido na conta '{self._credencial_ativa.usuario}'."
-                )
+                raise LimiteConsultasExcedido(f"Limite diário atingido na conta '{self._credencial_ativa.usuario}'.")
 
             try:
                 page.wait_for_selector(".selecionar--beneficio__btn", timeout=10_000)
@@ -330,8 +245,7 @@ class CorbanClient:
                 log.warning(f"  Nenhum benefício exibido para {cpf_fmt}")
                 return resultados
 
-            botoes_iniciais = page.query_selector_all(".selecionar--beneficio__btn")
-            qtd = len(botoes_iniciais)
+            qtd = len(page.query_selector_all(".selecionar--beneficio__btn"))
             if qtd == 0:
                 log.warning(f"  Nenhum benefício encontrado para {cpf_fmt}")
                 return resultados
@@ -342,17 +256,14 @@ class CorbanClient:
                 try:
                     page.wait_for_selector(".selecionar--beneficio__btn", timeout=10_000)
                     botoes = page.query_selector_all(".selecionar--beneficio__btn")
-
                     if i >= len(botoes):
-                        log.warning(f"  Botão do benefício {i + 1} não encontrado; pulando.")
                         break
 
                     nome_beneficio = f"Benefício {i + 1}"
                     try:
                         rotulo = botoes[i].evaluate("""el => {
-                            let cont = el.closest('[class*="beneficio"], [class*="card"], .panel, .box');
-                            if (!cont) cont = el.parentElement;
-                            return cont ? cont.innerText.split('\\n')[0].trim() : '';
+                            let c = el.closest('[class*="beneficio"], [class*="card"], .panel, .box') || el.parentElement;
+                            return c ? c.innerText.split('\\n')[0].trim() : '';
                         }""")
                         if rotulo:
                             nome_beneficio = rotulo[:60]
@@ -368,40 +279,24 @@ class CorbanClient:
                         pass
                     page.wait_for_timeout(self.config.tempo_espera * 1_000)
 
-                    aprovado = self._extrair_e_filtrar_beneficio(cpf_fmt)
-                    if aprovado:
+                    if aprovado := self._extrair_e_filtrar_beneficio(cpf_fmt):
                         resultados.append(aprovado)
                         log.info(f"  [★ APROVADO] CPF: {cpf_fmt} | Idade: {aprovado.idade} | Pagas: {aprovado.parcelas_pagas}")
 
-                    page.go_back()
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=15_000)
-                    except PlaywrightTimeout:
-                        pass
-                    page.wait_for_timeout(1_500)
-
-                    if i < qtd - 1:
-                        self._buscar_cpf(cpf_limpo)
+                    self._recuperar_posicao(cpf_limpo, i < qtd - 1)
 
                 except PlaywrightTimeout:
                     log.error(f"  Timeout no benefício {i + 1} do CPF {cpf_fmt}")
+                    self._recuperar_posicao(cpf_limpo, i < qtd - 1)
                 except Exception as e:
                     log.error(f"  Erro no benefício {i + 1} do CPF {cpf_fmt}: {e}")
-                    try:
-                        page.go_back()
-                        page.wait_for_timeout(2_000)
-                        if i < qtd - 1:
-                            self._buscar_cpf(cpf_limpo)
-                    except Exception:
-                        pass
+                    self._recuperar_posicao(cpf_limpo, i < qtd - 1)
 
             return resultados
 
         except LimiteConsultasExcedido:
             raise
         except Exception as e:
-            msg_e = str(e)
-            if "locator.click" in msg_e.lower() or isinstance(e, PlaywrightTimeout):
+            if "locator.click" in str(e).lower() or isinstance(e, PlaywrightTimeout):
                 raise ErroParadaImediata(f"Erro de Locator/Timeout no CPF {cpf_fmt}: {e}")
-            log.error(f"  Erro ao consultar CPF {cpf_fmt}: {e}")
             raise ErroParadaImediata(f"Erro inesperado no CPF {cpf_fmt}: {e}")
