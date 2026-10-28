@@ -1,0 +1,31 @@
+# Ambientes e Variáveis Sensíveis
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Dados e Planilhas (nenhum CSV ou dado de cliente versionado)
+*.csv
+*.xlsx
+*.xls
+*.txt
+!requirements.txt
+!main/requirements.txt
+*.json
+!pyrightconfig.json
+
+# Logs e Screenshots de depuração
+*.log
+*.png
+*.jpg
+*.jpeg
+debug_*.png
+scratch/
+
+# IDE e Configurações Pessoais
+.vscode/
+.idea/

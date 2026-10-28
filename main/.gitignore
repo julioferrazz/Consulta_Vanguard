@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+
+# Dados e saídas
+*.csv
+*.xlsx
+*.xls
+*.txt
+!requirements.txt
+*.log
+*.png
+debug_*.png
