@@ -41,9 +41,7 @@ Consulta_Vanguard/
 │   │   ├── storage.py           # Repositório de Dados (Leitura de CPFs e escrita no CSV)
 │   │   └── engine.py            # Motor de Execução (Orquestração, checkpoints e rotação)
 │   ├── consulta_corban.py       # Ponto de entrada (CLI enxuto)
-│   ├── requirements.txt         # Dependências do pacote main
-│   ├── .env.example             # Modelo de configuração para criação do .env local
-│   └── .gitignore               # Regras de exclusão local
+│   └── .env.example             # Modelo de configuração para criação do .env local
 ├── .gitignore                   # Ignora dados sensíveis, logs e arquivos CSV
 ├── pyrightconfig.json           # Configuração de Source Root para a IDE
 ├── requirements.txt             # Dependências na raiz
